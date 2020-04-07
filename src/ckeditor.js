@@ -37,6 +37,207 @@ import PasteFromOffice from '@ckeditor/ckeditor5-paste-from-office/src/pastefrom
 import Table from '@ckeditor/ckeditor5-table/src/table';
 import TableToolbar from '@ckeditor/ckeditor5-table/src/tabletoolbar';
 import TextTransformation from '@ckeditor/ckeditor5-typing/src/texttransformation';
+import Plugin from '@ckeditor/ckeditor5-core/src/plugin';
+import { toWidget, viewToModelPositionOutsideModelElement } from '@ckeditor/ckeditor5-widget/src/utils';
+import Widget from '@ckeditor/ckeditor5-widget/src/widget';
+import Command from '@ckeditor/ckeditor5-core/src/command';
+
+import { addListToDropdown, createDropdown } from '@ckeditor/ckeditor5-ui/src/dropdown/utils';
+import Collection from '@ckeditor/ckeditor5-utils/src/collection';
+import Model from '@ckeditor/ckeditor5-ui/src/model';
+
+class Placeholder extends Plugin {
+	static get requires() {
+		return [ PlaceholderEditing, PlaceholderUI ];
+	}
+}
+
+class PlaceholderCommand extends Command {
+	execute( { value } ) {
+		const editor = this.editor;
+
+		editor.model.change( writer => {
+			// Create a <placeholder> elment with the "name" attribute...
+			const placeholder = writer.createElement( 'placeholder', { name: value } );
+
+			// ... and insert it into the document.
+			editor.model.insertContent( placeholder );
+
+			// Put the selection on the inserted element.
+			writer.setSelection( placeholder, 'on' );
+		} );
+	}
+
+	refresh() {
+		const model = this.editor.model;
+		const selection = model.document.selection;
+
+		const isAllowed = model.schema.checkChild( selection.focus.parent, 'placeholder' );
+
+		this.isEnabled = isAllowed;
+	}
+}
+
+class PlaceholderUI extends Plugin {
+	init() {
+		const editor = this.editor;
+		const t = editor.t;
+		const placeholderNames = editor.config.get( 'placeholderConfig.types' );
+
+		// The "placeholder" dropdown must be registered among the UI components of the editor
+		// to be displayed in the toolbar.
+		editor.ui.componentFactory.add( 'placeholder', locale => {
+			const dropdownView = createDropdown( locale );
+
+			// Populate the list in the dropdown with items.
+			addListToDropdown( dropdownView, getDropdownItemsDefinitions( placeholderNames ) );
+
+			dropdownView.buttonView.set( {
+				// The t() function helps localize the editor. All strings enclosed in t() can be
+				// translated and change when the language of the editor changes.
+				label: t( '动态字段' ),
+				tooltip: true,
+				withText: true
+			} );
+
+			// Disable the placeholder button when the command is disabled.
+			const command = editor.commands.get( 'placeholder' );
+			dropdownView.bind( 'isEnabled' ).to( command );
+
+			// Execute the command when the dropdown item is clicked (executed).
+			this.listenTo( dropdownView, 'execute', evt => {
+				editor.execute( 'placeholder', { value: evt.source.commandParam } );
+				editor.editing.view.focus();
+			} );
+
+			return dropdownView;
+		} );
+	}
+}
+
+function getDropdownItemsDefinitions( placeholderNames ) {
+	const itemDefinitions = new Collection();
+
+	for ( const name of placeholderNames ) {
+		const definition = {
+			type: 'button',
+			model: new Model( {
+				commandParam: name,
+				label: name.name,
+				withText: true
+			} )
+		};
+
+		// Add the item definition to the collection.
+		itemDefinitions.add( definition );
+	}
+
+	return itemDefinitions;
+}
+
+class PlaceholderEditing extends Plugin {
+	static get requires() {
+		return [ Widget ];
+	}
+
+	init() {
+		// eslint-disable-next-line no-undef
+		console.log( 'PlaceholderEditing#init() got called' );
+		this._defineSchema();
+		this._defineConverters();
+
+		this.editor.commands.add( 'placeholder', new PlaceholderCommand( this.editor ) );
+
+		this.editor.editing.mapper.on(
+			'viewToModelPosition',
+			viewToModelPositionOutsideModelElement( this.editor.model, viewElement => viewElement.hasClass( 'placeholder' ) )
+		);
+		this.editor.config.define( 'placeholderConfig', {
+			types: [ {
+				'type': 'date',
+				'fieldId': 'dsdsdsd',
+				'name': '日期时间'
+			}, {
+				'type': 'user',
+				'fieldId': '1232sds',
+				'name': '姓名'
+			}, {
+				'type': 'dept',
+				'fieldId': '12323',
+				'name': '部门'
+			} ]
+		} );
+	}
+
+	_defineSchema() {
+		const schema = this.editor.model.schema;
+
+		schema.register( 'placeholder', {
+			// Allow wherever text is allowed:
+			allowWhere: '$text',
+
+			// The placeholder will act as an inline node:
+			isInline: true,
+
+			// The inline widget is self-contained so it cannot be split by the caret and it can be selected:
+			isObject: true,
+
+			// The placeholder can have many types, like date, name, surname, etc:
+			allowAttributes: [ 'name', 'dataFieldType' ]
+		} );
+	}
+
+	_defineConverters() {
+		const conversion = this.editor.conversion;
+
+		conversion.for( 'upcast' ).elementToElement( {
+			view: {
+				name: 'span',
+				classes: [ 'placeholder' ]
+			},
+			model: ( viewElement, modelWriter ) => {
+				// Extract the "name" from "{name}".
+				const dataFieldType = viewElement.getAttribute( 'data-field-type' );
+				const name = viewElement.getChild( 0 ).data.slice( 1, -1 );
+				// eslint-disable-next-line max-statements-per-line
+				if ( dataFieldType ) { return modelWriter.createElement( 'placeholder', { name, dataFieldType } ); }
+				return modelWriter.createElement( 'placeholder', { name } );
+			}
+		} );
+
+		conversion.for( 'editingDowncast' ).elementToElement( {
+			model: 'placeholder',
+			view: ( modelItem, viewWriter ) => {
+				const widgetElement = createPlaceholderView( modelItem, viewWriter );
+
+				// Enable widget handling on a placeholder element inside the editing view.
+				return toWidget( widgetElement, viewWriter );
+			}
+		} );
+
+		conversion.for( 'dataDowncast' ).elementToElement( {
+			model: 'placeholder',
+			view: createPlaceholderView
+		} );
+
+		// Helper method for both downcast converters.
+		function createPlaceholderView( modelItem, viewWriter ) {
+			const dataValue = modelItem.getAttribute( 'name' );
+			const dataFieldType = modelItem.getAttribute( 'dataFieldType' );
+			const placeholderView = viewWriter.createContainerElement( 'span', {
+				class: 'placeholder',
+				'data-field-type': dataFieldType ? dataFieldType : dataValue.type
+			} );
+
+			// Insert the placeholder name (as a text).
+			const value = dataFieldType ? dataValue : dataValue.name;
+			const innerText = viewWriter.createText( '{' + value + '}' );
+			viewWriter.insert( viewWriter.createPositionAt( placeholderView, 0 ), innerText );
+
+			return placeholderView;
+		}
+	}
+}
 
 export default class DecoupledEditor extends DecoupledEditorBase {}
 
@@ -72,7 +273,8 @@ DecoupledEditor.builtinPlugins = [
 	PasteFromOffice,
 	Table,
 	TableToolbar,
-	TextTransformation
+	TextTransformation,
+	Placeholder
 ];
 
 // Editor configuration.
@@ -106,7 +308,8 @@ DecoupledEditor.defaultConfig = {
 			'mediaEmbed',
 			'|',
 			'undo',
-			'redo'
+			'redo',
+			'Placeholder'
 		]
 	},
 	image: {
